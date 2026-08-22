@@ -1,0 +1,25 @@
+{
+  "name": "krishi-edge",
+  "version": "1.0.0",
+  "description": "Solar Mini Cold Storage System with ESP32 Cryptographic Passport & ESP32-CAM Live Vision for North Eastern Region (NER)",
+  "scripts": {
+    "backend": "cd backend && npm start",
+    "backend:dev": "cd backend && npm run dev",
+    "frontend": "cd frontend && npm run dev",
+    "frontend:build": "cd frontend && npm run build",
+    "install:all": "cd backend && npm install && cd ../frontend && npm install",
+    "start": "node -e \"console.log('Use \\\"npm run backend\\\" in one terminal and \\\"npm run frontend\\\" in another.')\""
+  },
+  "keywords": [
+    "esp32",
+    "cold-chain",
+    "solar",
+    "sha256",
+    "littlefs",
+    "esp32-cam",
+    "react",
+    "express"
+  ],
+  "author": "",
+  "license": "MIT"
+}
