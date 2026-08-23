@@ -1,6 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 require("dotenv").config();
 const { connectDB, getIsConnected } = require("./db");
 const { getUnits, getUnitById, getPassportLogs, appendPassportRecord } = require("./dataStore");
@@ -11,7 +13,9 @@ const { recordSensorReading, computeDerivedFeatures, checkMLServiceHealth, predi
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const HOST = "0.0.0.0";
 
+// Enable CORS for all incoming cross-origin requests from LAN / dashboard
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -19,7 +23,7 @@ app.use(express.urlencoded({ extended: true }));
 // Initialize MongoDB Connection (with graceful memory fallback)
 connectDB();
 
-// Store connected Server-Sent Events (SSE) clients
+// Store connected Server-Sent Events (SSE) clients for real-time dashboard pushes
 let sseClients = [];
 
 function broadcastEvent(eventType, data) {
@@ -31,6 +35,18 @@ function broadcastEvent(eventType, data) {
 // Pass broadcast function to Serial Bridge
 setBroadcastFunction(broadcastEvent);
 
+// Latest AGRICOLD telemetry cache in memory
+let latestTelemetry = {
+  temperature: 26.8,
+  humidity: 73.2,
+  state: "NORMAL",
+  action: "CONTINUE",
+  confidence: 95,
+  record: 1,
+  unitId: "CS-101",
+  timestamp: new Date().toISOString()
+};
+
 // =====================================================
 // API HEALTH & ML SERVICE STATUS
 // =====================================================
@@ -38,7 +54,7 @@ app.get("/api/health", async (req, res) => {
   const mlHealth = await checkMLServiceHealth();
   res.json({
     status: "online",
-    system: "Krishi-Edge Backend & ESP32 Gateway",
+    system: "AGRICOLD Telemetry Gateway",
     database: getIsConnected() ? "MongoDB (Active)" : "In-Memory Mode",
     serialBridge: getSerialStatus(),
     mlService: {
@@ -47,6 +63,105 @@ app.get("/api/health", async (req, res) => {
     },
     timestamp: new Date().toISOString(),
     connectedClients: sseClients.length,
+  });
+});
+
+// =====================================================
+// AGRICOLD TELEMETRY ENDPOINTS
+// =====================================================
+
+// GET /api/telemetry - Returns latest AGRICOLD telemetry record
+app.get("/api/telemetry", (req, res) => {
+  res.json(latestTelemetry);
+});
+
+// POST /api/telemetry - Receives telemetry from AGRICOLD Python Gateway
+app.post("/api/telemetry", async (req, res) => {
+  const {
+    unitId = "CS-101",
+    temperature,
+    humidity,
+    state,
+    action,
+    confidence,
+    record: rawRecord,
+    recordNumber,
+    timestamp,
+    previousHash,
+    currentHash,
+    power,
+    ...extraHardwareData
+  } = req.body;
+
+  // Validate payload
+  const tempNum = Number(temperature);
+  const humNum = Number(humidity);
+
+  if (temperature === undefined || humidity === undefined || isNaN(tempNum) || isNaN(humNum)) {
+    return res.status(400).json({
+      success: false,
+      error: "Malformed telemetry payload. 'temperature' and 'humidity' must be numeric."
+    });
+  }
+
+  const recNum = Number(rawRecord !== undefined ? rawRecord : (recordNumber !== undefined ? recordNumber : Date.now()));
+  const confNum = Number(confidence !== undefined ? confidence : 95);
+  const stateStr = String(state || (tempNum > 30.0 ? "WARNING" : "NORMAL"));
+  const actionStr = String(action || (stateStr === "WARNING" ? "VERIFY" : "CONTINUE"));
+
+  // Update rolling history for ML feature computation
+  recordSensorReading(unitId, { temperature: tempNum, humidity: humNum, power });
+
+  const recordData = await appendPassportRecord(unitId, {
+    recordNumber: recNum,
+    timestamp,
+    temperature: tempNum,
+    humidity: humNum,
+    state: stateStr,
+    action: actionStr,
+    confidence: confNum,
+    previousHash,
+    currentHash,
+    ...extraHardwareData
+  });
+
+  const computedHash = calculateSHA256(recordData);
+  const isValidHash = computedHash === recordData.currentHash;
+
+  latestTelemetry = {
+    temperature: tempNum,
+    humidity: humNum,
+    state: stateStr,
+    action: actionStr,
+    confidence: confNum,
+    record: recNum,
+    unitId,
+    timestamp: recordData.timestamp || new Date().toISOString()
+  };
+
+  if (stateStr === "WARNING" || stateStr === "HOLD" || stateStr === "FREEZE_RISK") {
+    dispatchAlertNotification({
+      sev: stateStr === "WARNING" ? "Warning" : "Critical",
+      title: `Condition Event: ${stateStr} at ${unitId}`,
+      sub: `Temperature ${tempNum.toFixed(1)}°C · Humidity ${humNum.toFixed(1)}% RH`,
+      unitId,
+    });
+  }
+
+  // Trigger ML prediction update asynchronously
+  predictForUnit(unitId).then((mlPrediction) => {
+    broadcastEvent("ml_prediction", mlPrediction);
+  }).catch((e) => console.warn(e));
+
+  // Push real-time telemetry update to connected React dashboard clients
+  broadcastEvent("telemetry", { unitId, record: recordData, isValidHash, latestTelemetry });
+
+  res.status(200).json({
+    success: true,
+    message: "Telemetry received",
+    unitId,
+    record: latestTelemetry,
+    isValidHash,
   });
 });
 
@@ -130,8 +245,6 @@ app.post("/api/ml/simulate", async (req, res) => {
       avg_humidity: 86,
       max_humidity: 90,
       humidity_std: 1.5,
-      time_above_90rh: 1.0,
-      time_above_95rh: 0.0,
       power_outages: 0,
       total_outage_hours: 0.0,
       longest_outage_hours: 0.0,
@@ -205,61 +318,6 @@ app.get("/api/passport/verify/:unitId", async (req, res) => {
 });
 
 // =====================================================
-// TELEMETRY INGESTION (From ESP32 Node)
-// =====================================================
-app.post("/api/telemetry", async (req, res) => {
-  const { unitId = "CS-101", recordNumber, timestamp, temperature, humidity, state, action, confidence, previousHash, currentHash, power, ...extraHardwareData } = req.body;
-
-  if (temperature === undefined || humidity === undefined) {
-    return res.status(400).json({ error: "Missing required sensor readings (temperature, humidity)" });
-  }
-
-  // Update rolling history for ML feature computation
-  recordSensorReading(unitId, { temperature, humidity, power });
-
-  const computedState = state || (temperature > 30.0 ? "WARNING" : "NORMAL");
-
-  const record = await appendPassportRecord(unitId, {
-    recordNumber,
-    timestamp,
-    temperature,
-    humidity,
-    state: computedState,
-    action: computedState === "WARNING" ? "VERIFY" : "CONTINUE",
-    confidence: computedState === "WARNING" ? 85 : 95,
-    previousHash,
-    currentHash,
-    ...extraHardwareData
-  });
-
-  const computedHash = calculateSHA256(record);
-  const isValidHash = computedHash === record.currentHash;
-
-  if (record.state === "WARNING" || record.state === "HOLD" || record.state === "FREEZE_RISK") {
-    dispatchAlertNotification({
-      sev: record.state === "WARNING" ? "Warning" : "Critical",
-      title: `Condition Event: ${record.state} at ${unitId}`,
-      sub: `Temperature ${record.temperature.toFixed(1)}°C · Humidity ${record.humidity.toFixed(1)}% RH`,
-      unitId,
-    });
-  }
-
-  // Trigger ML prediction every telemetry record
-  predictForUnit(unitId).then((mlPrediction) => {
-    broadcastEvent("ml_prediction", mlPrediction);
-  }).catch((e) => console.warn(e));
-
-  broadcastEvent("telemetry", { unitId, record, isValidHash });
-
-  res.status(201).json({
-    message: "Condition record persisted to NoSQL database successfully",
-    unitId,
-    record,
-    isValidHash,
-  });
-});
-
-// =====================================================
 // USB SERIAL COM PORT BRIDGE ENDPOINTS
 // =====================================================
 app.get("/api/serial/ports", async (req, res) => {
@@ -304,7 +362,7 @@ app.get("/api/notifications/history", (req, res) => {
 app.post("/api/notifications/test", async (req, res) => {
   const testAlert = {
     sev: "Warning",
-    title: "Test Alert Dispatch from Krishi-Edge Gateway",
+    title: "Test Alert Dispatch from AGRICOLD Gateway",
     sub: "Simulated excursion event: Temp 32.5°C (Exceeded 30.0°C limit).",
     unitId: "CS-101",
   };
@@ -342,9 +400,6 @@ app.post("/api/simulate/telemetry", async (req, res) => {
 // =====================================================
 // ESP32-CAM PROXY ENDPOINT
 // =====================================================
-const fs = require("fs");
-const path = require("path");
-
 app.get("/api/camera/snapshot", (req, res) => {
   const targetIp = req.query.ip || "192.168.1.100";
   const localImgPath = path.join(__dirname, "camera_feed.jpg");
@@ -401,11 +456,12 @@ app.get("/api/events", (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+// Bind server to 0.0.0.0 on port 5000 for LAN connectivity
+app.listen(PORT, HOST, () => {
   console.log(`====================================================`);
-  console.log(`  KRISHI-EDGE BACKEND & ESP32 GATEWAY LISTENING ON PORT ${PORT}`);
-  console.log(`  Telemetry Ingestion: http://localhost:${PORT}/api/telemetry`);
-  console.log(`  ML Service Target  : ${ML_SERVICE_URL}/predict`);
-  console.log(`  USB Serial Bridge  : http://localhost:${PORT}/api/serial/ports`);
+  console.log(`  AGRICOLD TELEMETRY BACKEND LISTENING ON ${HOST}:${PORT}`);
+  console.log(`  Telemetry POST Endpoint : http://${HOST}:${PORT}/api/telemetry`);
+  console.log(`  Telemetry GET Endpoint  : http://${HOST}:${PORT}/api/telemetry`);
+  console.log(`  USB Serial Bridge       : http://${HOST}:${PORT}/api/serial/ports`);
   console.log(`====================================================`);
 });
