@@ -1,4 +1,6 @@
-tensorflow==2.16.1
+tensorflow>=2.16
 numpy
 pillow
+scikit-learn
+matplotlib
 paho-mqtt>=2.0.0

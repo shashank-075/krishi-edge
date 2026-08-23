@@ -1,5 +1,5 @@
 """
-Converts models/coldroot_freshness_int8.tflite into a C header file
+Converts models/agricold_freshness_int8.tflite into a C header file
 (model_data.h) containing a byte array — this is how you embed the model
 directly into ESP32-CAM firmware (Arduino / ESP-IDF), since the board has
 no filesystem to load a .tflite file from at runtime in most setups.
@@ -14,10 +14,14 @@ OUTPUT:
 import pathlib
 
 MODEL_DIR = pathlib.Path("models")
-TFLITE_PATH = MODEL_DIR / "coldroot_freshness_int8.tflite"
+TFLITE_PATH = MODEL_DIR / "agricold_freshness_int8.tflite"
 HEADER_PATH = MODEL_DIR / "model_data.h"
-ARRAY_NAME = "coldroot_freshness_model"
+ARRAY_NAME = "agricold_freshness_model"
 
+CLASS_NAMES = [
+    'fresh_apple', 'fresh_banana', 'fresh_orange', 
+    'rotten_apple', 'rotten_banana', 'rotten_orange'
+]
 
 def main():
     if not TFLITE_PATH.exists():
@@ -26,10 +30,11 @@ def main():
     data = TFLITE_PATH.read_bytes()
 
     lines = [
-        "// Auto-generated from coldroot_freshness_int8.tflite",
+        "// Auto-generated from agricold_freshness_int8.tflite",
         "// Do not edit by hand — regenerate with convert_to_c_array.py",
-        "#ifndef COLDROOT_FRESHNESS_MODEL_H",
-        "#define COLDROOT_FRESHNESS_MODEL_H",
+        "// Class Labels: " + ", ".join(CLASS_NAMES),
+        "#ifndef AGRICOLD_FRESHNESS_MODEL_H",
+        "#define AGRICOLD_FRESHNESS_MODEL_H",
         "",
         "alignas(8) const unsigned char " + ARRAY_NAME + "[] = {",
     ]
@@ -42,7 +47,7 @@ def main():
         "};",
         f"const unsigned int {ARRAY_NAME}_len = {len(data)};",
         "",
-        "#endif  // COLDROOT_FRESHNESS_MODEL_H",
+        "#endif  // AGRICOLD_FRESHNESS_MODEL_H",
         "",
     ]
 
