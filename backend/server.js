@@ -7,6 +7,7 @@ const { getUnits, getUnitById, getPassportLogs, appendPassportRecord } = require
 const { verifyPassportChain, calculateSHA256 } = require("./passportEngine");
 const { listSerialPorts, connectSerialPort, disconnectSerialPort, getSerialStatus, setBroadcastFunction } = require("./serialBridge");
 const { dispatchAlertNotification, getSettings, updateSettings, getNotificationHistory } = require("./alertNotifier");
+const { recordSensorReading, computeDerivedFeatures, checkMLServiceHealth, predictForUnit, getLatestPrediction, ML_SERVICE_URL } = require("./mlClient");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -31,16 +32,120 @@ function broadcastEvent(eventType, data) {
 setBroadcastFunction(broadcastEvent);
 
 // =====================================================
-// API HEALTH
+// API HEALTH & ML SERVICE STATUS
 // =====================================================
-app.get("/api/health", (req, res) => {
+app.get("/api/health", async (req, res) => {
+  const mlHealth = await checkMLServiceHealth();
   res.json({
     status: "online",
-    system: "Krishi-Edge Backend & ESP32 Passport Gateway",
+    system: "Krishi-Edge Backend & ESP32 Gateway",
     database: getIsConnected() ? "MongoDB (Active)" : "In-Memory Mode",
     serialBridge: getSerialStatus(),
+    mlService: {
+      url: ML_SERVICE_URL,
+      ...mlHealth
+    },
     timestamp: new Date().toISOString(),
     connectedClients: sseClients.length,
+  });
+});
+
+// =====================================================
+// FASTAPI ML STORAGE INTELLIGENCE ENDPOINTS (http://172.21.42.90:8000)
+// =====================================================
+app.get("/api/ml/health", async (req, res) => {
+  const health = await checkMLServiceHealth();
+  res.json(health);
+});
+
+app.get("/api/ml/predict/:unitId?", async (req, res) => {
+  const unitId = req.params.unitId || "CS-101";
+  const prediction = getLatestPrediction(unitId) || await predictForUnit(unitId);
+  res.json(prediction);
+});
+
+app.post("/api/ml/predict", async (req, res) => {
+  const { unitId = "CS-101", customFeatures } = req.body;
+  const prediction = await predictForUnit(unitId, customFeatures || req.body);
+  broadcastEvent("ml_prediction", prediction);
+  res.json(prediction);
+});
+
+app.post("/api/ml/simulate", async (req, res) => {
+  const { unitId = "CS-101", scenario = "normal" } = req.body;
+
+  let demoFeatures;
+
+  if (scenario === "outage") {
+    demoFeatures = {
+      produce_type: "tomato",
+      storage_hours: 48,
+      avg_temperature: 12.4,
+      max_temperature: 16.8,
+      min_temperature: 7.8,
+      temperature_std: 3.1,
+      time_above_10c: 8.5,
+      time_above_12c: 4.2,
+      avg_humidity: 92,
+      max_humidity: 97,
+      humidity_std: 3.8,
+      time_above_90rh: 12.0,
+      time_above_95rh: 4.5,
+      power_outages: 3,
+      total_outage_hours: 5.2,
+      longest_outage_hours: 3.5,
+      temperature_recovery_minutes: 85
+    };
+  } else if (scenario === "warning") {
+    demoFeatures = {
+      produce_type: "capsicum",
+      storage_hours: 72,
+      avg_temperature: 14.2,
+      max_temperature: 18.5,
+      min_temperature: 9.0,
+      temperature_std: 4.2,
+      time_above_10c: 18.0,
+      time_above_12c: 12.5,
+      avg_humidity: 94,
+      max_humidity: 98,
+      humidity_std: 4.1,
+      time_above_90rh: 24.0,
+      time_above_95rh: 10.0,
+      power_outages: 4,
+      total_outage_hours: 8.0,
+      longest_outage_hours: 4.5,
+      temperature_recovery_minutes: 120
+    };
+  } else {
+    // Normal storage scenario
+    demoFeatures = {
+      produce_type: "tomato",
+      storage_hours: 48,
+      avg_temperature: 4.5,
+      max_temperature: 7.2,
+      min_temperature: 3.8,
+      temperature_std: 0.8,
+      time_above_10c: 0.0,
+      time_above_12c: 0.0,
+      avg_humidity: 86,
+      max_humidity: 90,
+      humidity_std: 1.5,
+      time_above_90rh: 1.0,
+      time_above_95rh: 0.0,
+      power_outages: 0,
+      total_outage_hours: 0.0,
+      longest_outage_hours: 0.0,
+      temperature_recovery_minutes: 0
+    };
+  }
+
+  const prediction = await predictForUnit(unitId, demoFeatures);
+  broadcastEvent("ml_prediction", prediction);
+
+  res.json({
+    message: `Simulated ML prediction calculated for scenario: ${scenario}`,
+    scenario,
+    prediction
   });
 });
 
@@ -49,7 +154,14 @@ app.get("/api/health", (req, res) => {
 // =====================================================
 app.get("/api/units", async (req, res) => {
   const units = await getUnits();
-  res.json(units);
+  const merged = units.map((u) => {
+    const ml = getLatestPrediction(u.id);
+    return {
+      ...u,
+      mlPrediction: ml || null
+    };
+  });
+  res.json(merged);
 });
 
 app.get("/api/units/:id", async (req, res) => {
@@ -58,8 +170,11 @@ app.get("/api/units/:id", async (req, res) => {
     return res.status(404).json({ error: "Unit not found" });
   }
   const passport = await getPassportLogs(unit.id);
+  const ml = getLatestPrediction(unit.id) || await predictForUnit(unit.id);
+
   res.json({
     ...unit,
+    mlPrediction: ml,
     passportCount: passport.length,
     latestPassport: passport[passport.length - 1] || null
   });
@@ -91,14 +206,16 @@ app.get("/api/passport/verify/:unitId", async (req, res) => {
 
 // =====================================================
 // TELEMETRY INGESTION (From ESP32 Node)
-// Supports ESP32 OLED main sensor code (temp > 30 => WARNING)
 // =====================================================
 app.post("/api/telemetry", async (req, res) => {
-  const { unitId = "CS-101", recordNumber, timestamp, temperature, humidity, state, action, confidence, previousHash, currentHash, ...extraHardwareData } = req.body;
+  const { unitId = "CS-101", recordNumber, timestamp, temperature, humidity, state, action, confidence, previousHash, currentHash, power, ...extraHardwareData } = req.body;
 
   if (temperature === undefined || humidity === undefined) {
     return res.status(400).json({ error: "Missing required sensor readings (temperature, humidity)" });
   }
+
+  // Update rolling history for ML feature computation
+  recordSensorReading(unitId, { temperature, humidity, power });
 
   const computedState = state || (temperature > 30.0 ? "WARNING" : "NORMAL");
 
@@ -126,6 +243,11 @@ app.post("/api/telemetry", async (req, res) => {
       unitId,
     });
   }
+
+  // Trigger ML prediction every telemetry record
+  predictForUnit(unitId).then((mlPrediction) => {
+    broadcastEvent("ml_prediction", mlPrediction);
+  }).catch((e) => console.warn(e));
 
   broadcastEvent("telemetry", { unitId, record, isValidHash });
 
@@ -196,6 +318,8 @@ app.post("/api/notifications/test", async (req, res) => {
 app.post("/api/simulate/telemetry", async (req, res) => {
   const { unitId = "CS-101", temp = 28.5, humidity = 82.0 } = req.body;
 
+  recordSensorReading(unitId, { temperature: temp, humidity });
+
   const record = await appendPassportRecord(unitId, {
     temperature: temp,
     humidity: humidity,
@@ -204,18 +328,33 @@ app.post("/api/simulate/telemetry", async (req, res) => {
   const computedHash = calculateSHA256(record);
   broadcastEvent("telemetry", { unitId, record, isValidHash: true });
 
+  const mlPrediction = await predictForUnit(unitId);
+  broadcastEvent("ml_prediction", mlPrediction);
+
   res.json({
     message: "Simulated telemetry injected into NoSQL database",
     unitId,
     record,
+    mlPrediction
   });
 });
 
 // =====================================================
 // ESP32-CAM PROXY ENDPOINT
 // =====================================================
+const fs = require("fs");
+const path = require("path");
+
 app.get("/api/camera/snapshot", (req, res) => {
   const targetIp = req.query.ip || "192.168.1.100";
+  const localImgPath = path.join(__dirname, "camera_feed.jpg");
+
+  if (fs.existsSync(localImgPath)) {
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    return res.sendFile(localImgPath);
+  }
+
   const url = `http://${targetIp}/capture`;
 
   const request = http.get(url, { timeout: 2500 }, (camRes) => {
@@ -239,7 +378,6 @@ app.get("/api/camera/snapshot", (req, res) => {
         <text x="320" y="210" fill="#ffffff" font-family="Arial" font-size="22" font-weight="bold" text-anchor="middle">ESP32-CAM LIVE FEED</text>
         <text x="320" y="245" fill="#38bdf8" font-family="monospace" font-size="16" text-anchor="middle">IP: ${targetIp}</text>
         <text x="320" y="285" fill="#94a3b8" font-family="Arial" font-size="14" text-anchor="middle">GC2145 RGB565 → JPEG Stream</text>
-        <text x="320" y="440" fill="#ef4444" font-family="Arial" font-size="12" text-anchor="middle">● Hardware Offline (Simulation Active)</text>
       </svg>
     `;
     res.send(svgFrame);
@@ -267,6 +405,7 @@ app.listen(PORT, () => {
   console.log(`====================================================`);
   console.log(`  KRISHI-EDGE BACKEND & ESP32 GATEWAY LISTENING ON PORT ${PORT}`);
   console.log(`  Telemetry Ingestion: http://localhost:${PORT}/api/telemetry`);
+  console.log(`  ML Service Target  : ${ML_SERVICE_URL}/predict`);
   console.log(`  USB Serial Bridge  : http://localhost:${PORT}/api/serial/ports`);
   console.log(`====================================================`);
 });

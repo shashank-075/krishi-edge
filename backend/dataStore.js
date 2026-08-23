@@ -14,27 +14,29 @@ const VILLAGES = [
 ];
 
 const PRODUCE = [
-  "Tomato", "Cabbage", "French Beans", "Leafy Greens",
+  "Fresh Fruits (Apple, Pomegranate, Orange)", "Tomato", "Cabbage", "French Beans", "Leafy Greens",
   "Chilli", "Cauliflower", "Carrot", "Capsicum"
 ];
 
 let units = [
   {
     id: "CS-101",
-    village: "Diphu Collection Centre 1",
+    village: "Diphu Solar Prototype Unit 1",
     state: "Assam",
     status: "Healthy",
-    mode: "Solar",
+    mode: "Solar (3S Li-ion 18650)",
     capacityL: 3,
     lat: 25.84,
     lng: 93.43,
     temp: 4.2,
     humidity: 86.5,
-    battery: 92,
+    battery: 96.67,
+    batterySpec: "18650 3S Li-ion Battery Configuration (11.1V / 12.6V Pack)",
     solarW: 38.5,
-    produce: "Tomato",
-    loadKg: 12.5,
-    doorOpensToday: 4,
+    solarStatus: "Current State of Charge using Solar: 96.67%",
+    produce: "Fresh Fruits (1 Apple, 1 Pomegranate, 1 Orange)",
+    loadKg: 0.4,
+    doorOpensToday: 2,
     lastPowerFailureH: 48,
     camIp: "192.168.1.100",
     lastSeen: new Date().toISOString(),
@@ -44,17 +46,17 @@ let units = [
     village: "Nongpoh Farmer Co-op 2",
     state: "Meghalaya",
     status: "Healthy",
-    mode: "Solar",
-    capacityL: 10,
+    mode: "Solar (3S Li-ion 18650)",
+    capacityL: 3,
     lat: 25.90,
     lng: 91.88,
     temp: 3.8,
     humidity: 89.0,
-    battery: 88,
+    battery: 95.4,
     solarW: 41.0,
     produce: "Cabbage",
-    loadKg: 24.0,
-    doorOpensToday: 6,
+    loadKg: 0.4,
+    doorOpensToday: 4,
     lastPowerFailureH: 72,
     lastSeen: new Date().toISOString(),
   },
@@ -64,36 +66,17 @@ let units = [
     state: "Manipur",
     status: "Warning",
     mode: "Eco Mode",
-    capacityL: 20,
+    capacityL: 3,
     lat: 25.11,
     lng: 94.36,
     temp: 7.2,
     humidity: 92.4,
-    battery: 34,
+    battery: 42.0,
     solarW: 14.2,
     produce: "French Beans",
-    loadKg: 18.2,
-    doorOpensToday: 11,
+    loadKg: 0.4,
+    doorOpensToday: 8,
     lastPowerFailureH: 6,
-    lastSeen: new Date().toISOString(),
-  },
-  {
-    id: "CS-104",
-    village: "Champhai Market Hub 4",
-    state: "Mizoram",
-    status: "Critical",
-    mode: "Battery Backup",
-    capacityL: 30,
-    lat: 23.47,
-    lng: 93.32,
-    temp: 11.4,
-    humidity: 94.8,
-    battery: 18,
-    solarW: 0.0,
-    produce: "Leafy Greens",
-    loadKg: 8.5,
-    doorOpensToday: 18,
-    lastPowerFailureH: 2,
     lastSeen: new Date().toISOString(),
   }
 ];
@@ -202,12 +185,11 @@ async function appendPassportRecord(unitId, recordData) {
     action,
     confidence: Number(confidence),
     previousHash,
-    ...recordData // Preserves any additional flexible sensor payload sent by ESP32!
+    ...recordData
   };
 
   entry.currentHash = recordData.currentHash || calculateSHA256(entry);
 
-  // Store in MongoDB if connected
   if (getIsConnected()) {
     try {
       await PassportModel.create(entry);
@@ -226,7 +208,6 @@ async function appendPassportRecord(unitId, recordData) {
     }
   }
 
-  // Also maintain in-memory array for fast access
   if (!conditionPassports[unitId]) conditionPassports[unitId] = [];
   conditionPassports[unitId].push(entry);
 
