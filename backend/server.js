@@ -398,31 +398,59 @@ app.post("/api/simulate/telemetry", async (req, res) => {
 });
 
 // =====================================================
-// ESP32-CAM PROXY ENDPOINT
+// ESP32-CAM PROXY ENDPOINTS (MJPEG LIVE STREAM)
+// Target Camera IP: 172.21.42.57 /stream
 // =====================================================
-app.get("/api/camera/snapshot", (req, res) => {
-  const targetIp = req.query.ip || "192.168.1.100";
-  const localImgPath = path.join(__dirname, "camera_feed.jpg");
+app.get("/api/camera/stream", (req, res) => {
+  const targetIp = req.query.ip || "172.21.42.57";
+  const url = `http://${targetIp}/stream`;
 
-  if (fs.existsSync(localImgPath)) {
-    res.setHeader("Content-Type", "image/jpeg");
-    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    return res.sendFile(localImgPath);
-  }
-
-  const url = `http://${targetIp}/capture`;
-
-  const request = http.get(url, { timeout: 2500 }, (camRes) => {
+  const request = http.get(url, { timeout: 4000 }, (camRes) => {
     if (camRes.statusCode === 200) {
-      res.setHeader("Content-Type", "image/jpeg");
+      res.setHeader("Content-Type", camRes.headers["content-type"] || "multipart/x-mixed-replace; boundary=frame");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       camRes.pipe(res);
     } else {
+      res.status(camRes.statusCode).send("Camera stream error");
+    }
+  });
+
+  request.on("error", (err) => {
+    console.warn(`Camera proxy error for ${url}:`, err.message);
+    const localImgPath = path.join(__dirname, "camera_feed.jpg");
+    if (fs.existsSync(localImgPath)) {
+      res.setHeader("Content-Type", "image/jpeg");
+      return res.sendFile(localImgPath);
+    }
+    res.status(503).send("Camera stream offline");
+  });
+});
+
+app.get("/api/camera/snapshot", (req, res) => {
+  const targetIp = req.query.ip || "172.21.42.57";
+  const url = `http://${targetIp}/stream`;
+
+  const request = http.get(url, { timeout: 4000 }, (camRes) => {
+    if (camRes.statusCode === 200) {
+      res.setHeader("Content-Type", camRes.headers["content-type"] || "multipart/x-mixed-replace; boundary=frame");
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      camRes.pipe(res);
+    } else {
+      const localImgPath = path.join(__dirname, "camera_feed.jpg");
+      if (fs.existsSync(localImgPath)) {
+        res.setHeader("Content-Type", "image/jpeg");
+        return res.sendFile(localImgPath);
+      }
       res.status(camRes.statusCode).send("Camera response error");
     }
   });
 
   request.on("error", () => {
+    const localImgPath = path.join(__dirname, "camera_feed.jpg");
+    if (fs.existsSync(localImgPath)) {
+      res.setHeader("Content-Type", "image/jpeg");
+      return res.sendFile(localImgPath);
+    }
     res.setHeader("Content-Type", "image/svg+xml");
     res.setHeader("Cache-Control", "no-cache");
     const svgFrame = `

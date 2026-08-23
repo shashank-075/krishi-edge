@@ -7,8 +7,8 @@
 // WIFI
 // =====================================================
 
-const char* ssid = "Realme";
-const char* password = "okok12345";
+const char* ssid = "why so serious?";
+const char* password = "shashank89";
 
 WebServer server(80);
 

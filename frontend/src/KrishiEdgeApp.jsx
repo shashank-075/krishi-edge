@@ -623,61 +623,66 @@ function SerialBridgePanel() {
 
 /* ===================== NEW: ESP32-CAM LIVE STREAM SECTION ===================== */
 function CameraSection({ units }) {
-  const [selectedIp, setSelectedIp] = useState("192.168.1.100");
-  const [refreshInterval, setRefreshInterval] = useState(300);
-  const [liveKey, setLiveKey] = useState(Date.now());
+  const [selectedIp, setSelectedIp] = useState("172.21.42.57");
+  const [useProxy, setUseProxy] = useState(false);
   const [isPlaying, setIsPlaying] = useState(true);
 
-  useEffect(() => {
-    if (!isPlaying) return;
-    const interval = setInterval(() => {
-      setLiveKey(Date.now());
-    }, refreshInterval);
-    return () => clearInterval(interval);
-  }, [refreshInterval, isPlaying]);
-
-  const streamSrc = `/api/camera/snapshot?ip=${selectedIp}&t=${liveKey}`;
+  // MJPEG video stream URL (Native stream from ESP32-CAM on http://172.21.42.57/stream or via Express proxy)
+  const streamSrc = useProxy
+    ? `/api/camera/stream?ip=${selectedIp}`
+    : `http://${selectedIp}/stream`;
 
   return (
     <div>
       <PageHead
-        title="AI-Thinker ESP32-CAM (3L Cold Storage Chamber Feed)"
-        subtitle="Low-latency visual fruit inspection inside the 3L solar cold storage prototype chamber (GC2145 RGB565 sensor on Port 80)."
+        title="AI-Thinker ESP32-CAM (Live 3L Chamber Camera Feed)"
+        subtitle="Real-time visual fruit inspection inside the 3L cold storage prototype chamber (GC2145 RGB565 -> /stream on IP 172.21.42.57)."
       />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 14 }}>
-        <Panel title="Live Chamber Visual Monitor (3L Prototype Unit)" iconName="camera" iconColor={C.solar}
+        <Panel title="Live Chamber Visual Monitor (TVCE 3L Prototype)" iconName="camera" iconColor={C.solar}
           right={
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 11, color: C.safe, fontWeight: 800, display: "flex", alignItems: "center", gap: 4 }}>
-                <span style={{ width: 8, height: 8, borderRadius: 99, background: C.safe, animation: "pulse 1.5s infinite" }} /> LIVE ESP32-CAM
+                <span style={{ width: 8, height: 8, borderRadius: 99, background: C.safe, animation: "pulse 1.5s infinite" }} /> LIVE ESP32-CAM (172.21.42.57)
               </span>
               <button onClick={() => setIsPlaying(!isPlaying)} style={{ background: C.panelAlt, border: `1px solid ${C.line2}`, borderRadius: 8, padding: "4px 9px", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
-                {isPlaying ? "Pause" : "Resume"}
+                {isPlaying ? "Pause Stream" : "Resume Stream"}
               </button>
             </div>
           }>
 
           <div style={{ background: "#0F172A", borderRadius: 14, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", minHeight: 380, position: "relative" }}>
-            <img
-              src={streamSrc}
-              alt="ESP32-CAM Live Chamber Feed"
-              style={{ width: "100%", maxHeight: 440, objectFit: "cover" }}
-              onError={(e) => {
-                e.target.src = "/camera_feed.jpg";
-              }}
-            />
+            {isPlaying ? (
+              <img
+                src={streamSrc}
+                alt="ESP32-CAM Live Chamber Feed"
+                style={{ width: "100%", maxHeight: 440, objectFit: "cover" }}
+                onError={(e) => {
+                  e.target.onerror = null;
+                  if (!useProxy) {
+                    setUseProxy(true);
+                  } else {
+                    e.target.src = "/camera_feed.jpg";
+                  }
+                }}
+              />
+            ) : (
+              <div style={{ color: "#94a3b8", fontSize: 13, fontWeight: 700, padding: 40, textAlign: "center" }}>
+                Stream Paused (Click Resume Stream to reconnect)
+              </div>
+            )}
 
             {/* OSD Overlay for authentic ESP32-CAM camera feed look */}
             <div style={{ position: "absolute", top: 12, left: 14, background: "rgba(15,23,42,0.82)", color: "#38bdf8", padding: "4px 10px", borderRadius: 6, fontSize: 11, fontFamily: "monospace", display: "flex", gap: 10, alignItems: "center", border: "1px solid rgba(56,189,248,0.3)" }}>
               <span style={{ width: 8, height: 8, borderRadius: 99, background: "#22c55e", display: "inline-block" }} />
-              <span>● REC: 3L CHAMBER (1 APPLE, 1 POMEGRANATE, 1 ORANGE - 400g)</span>
+              <span>● LIVE HARDWARE FEED: 3L CHAMBER (1 APPLE, 1 POMEGRANATE, 1 ORANGE - 400g)</span>
             </div>
 
             <div style={{ position: "absolute", bottom: 12, left: 14, right: 14, background: "rgba(15,23,42,0.85)", color: "#fff", padding: "6px 12px", borderRadius: 8, fontSize: 11, fontFamily: "monospace", display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 10, border: "1px solid rgba(255,255,255,0.15)" }}>
-              <span>IP: {selectedIp} (GC2145 RGB565)</span>
-              <span>RATE: {refreshInterval}ms</span>
-              <span style={{ color: "#38bdf8", fontWeight: 800 }}>SOLAR BATT: 96.67% (3S 18650 Li-ion)</span>
+              <span>IP: {selectedIp} (http://{selectedIp}/stream)</span>
+              <span>MODE: MJPEG LIVE</span>
+              <span style={{ color: "#38bdf8", fontWeight: 800 }}>3S 18650 BATT: 96.67%</span>
             </div>
           </div>
         </Panel>
@@ -717,11 +722,9 @@ function CameraSection({ units }) {
               </div>
 
               <div>
-                <label style={{ fontSize: 11, fontWeight: 800, color: C.inkFaint }}>Frame Refresh Rate (ms)</label>
-                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-                  {[200, 300, 500, 1000].map((ms) => (
-                    <Pill key={ms} label={`${ms}ms`} active={refreshInterval === ms} color={C.solar} onClick={() => setRefreshInterval(ms)} />
-                  ))}
+                <label style={{ fontSize: 11, fontWeight: 800, color: C.inkFaint }}>Stream Mode</label>
+                <div style={{ marginTop: 4, fontSize: 12, fontWeight: 700, color: C.safe }}>
+                  MJPEG Live Stream (no polling needed)
                 </div>
               </div>
 

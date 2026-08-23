@@ -177,15 +177,15 @@ async function appendPassportRecord(unitId, recordData) {
 
   const entry = {
     unitId,
+    ...recordData,
     recordNumber: Number(recordNumber),
-    timestamp,
+    timestamp: timestamp || recordData.timestamp || new Date().toISOString().replace("T", " ").substring(0, 19),
     temperature: temp,
     humidity: humidity,
     state,
     action,
     confidence: Number(confidence),
     previousHash,
-    ...recordData
   };
 
   entry.currentHash = recordData.currentHash || calculateSHA256(entry);
