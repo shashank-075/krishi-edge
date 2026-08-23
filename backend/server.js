@@ -5,6 +5,8 @@ require("dotenv").config();
 const { connectDB, getIsConnected } = require("./db");
 const { getUnits, getUnitById, getPassportLogs, appendPassportRecord } = require("./dataStore");
 const { verifyPassportChain, calculateSHA256 } = require("./passportEngine");
+const { listSerialPorts, connectSerialPort, disconnectSerialPort, getSerialStatus, setBroadcastFunction } = require("./serialBridge");
+const { dispatchAlertNotification, getSettings, updateSettings, getNotificationHistory } = require("./alertNotifier");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -25,6 +27,9 @@ function broadcastEvent(eventType, data) {
   });
 }
 
+// Pass broadcast function to Serial Bridge
+setBroadcastFunction(broadcastEvent);
+
 // =====================================================
 // API HEALTH
 // =====================================================
@@ -33,6 +38,7 @@ app.get("/api/health", (req, res) => {
     status: "online",
     system: "Krishi-Edge Backend & ESP32 Passport Gateway",
     database: getIsConnected() ? "MongoDB (Active)" : "In-Memory Mode",
+    serialBridge: getSerialStatus(),
     timestamp: new Date().toISOString(),
     connectedClients: sseClients.length,
   });
@@ -52,14 +58,16 @@ app.get("/api/units/:id", async (req, res) => {
     return res.status(404).json({ error: "Unit not found" });
   }
   const passport = await getPassportLogs(unit.id);
-  res.json({ ...unit, passportCount: passport.length, latestPassport: passport[passport.length - 1] || null });
+  res.json({
+    ...unit,
+    passportCount: passport.length,
+    latestPassport: passport[passport.length - 1] || null
+  });
 });
 
 // =====================================================
 // CONDITION PASSPORT & HASH CHAIN ENDPOINTS
 // =====================================================
-
-// Get raw condition log records for a unit
 app.get("/api/passport/:unitId", async (req, res) => {
   const { unitId } = req.params;
   const logs = await getPassportLogs(unitId);
@@ -70,7 +78,6 @@ app.get("/api/passport/:unitId", async (req, res) => {
   });
 });
 
-// Cryptographic verification of SHA-256 hash chain
 app.get("/api/passport/verify/:unitId", async (req, res) => {
   const { unitId } = req.params;
   const logs = await getPassportLogs(unitId);
@@ -84,7 +91,7 @@ app.get("/api/passport/verify/:unitId", async (req, res) => {
 
 // =====================================================
 // TELEMETRY INGESTION (From ESP32 Node)
-// Stores records dynamically in MongoDB (NoSQL)
+// Supports ESP32 OLED main sensor code (temp > 30 => WARNING)
 // =====================================================
 app.post("/api/telemetry", async (req, res) => {
   const { unitId = "CS-101", recordNumber, timestamp, temperature, humidity, state, action, confidence, previousHash, currentHash, ...extraHardwareData } = req.body;
@@ -93,21 +100,32 @@ app.post("/api/telemetry", async (req, res) => {
     return res.status(400).json({ error: "Missing required sensor readings (temperature, humidity)" });
   }
 
+  const computedState = state || (temperature > 30.0 ? "WARNING" : "NORMAL");
+
   const record = await appendPassportRecord(unitId, {
     recordNumber,
     timestamp,
     temperature,
     humidity,
-    state,
-    action,
-    confidence,
+    state: computedState,
+    action: computedState === "WARNING" ? "VERIFY" : "CONTINUE",
+    confidence: computedState === "WARNING" ? 85 : 95,
     previousHash,
     currentHash,
-    ...extraHardwareData // Flexible NoSQL: Any extra fields sent by ESP32 are persisted dynamically!
+    ...extraHardwareData
   });
 
   const computedHash = calculateSHA256(record);
   const isValidHash = computedHash === record.currentHash;
+
+  if (record.state === "WARNING" || record.state === "HOLD" || record.state === "FREEZE_RISK") {
+    dispatchAlertNotification({
+      sev: record.state === "WARNING" ? "Warning" : "Critical",
+      title: `Condition Event: ${record.state} at ${unitId}`,
+      sub: `Temperature ${record.temperature.toFixed(1)}°C · Humidity ${record.humidity.toFixed(1)}% RH`,
+      unitId,
+    });
+  }
 
   broadcastEvent("telemetry", { unitId, record, isValidHash });
 
@@ -120,10 +138,63 @@ app.post("/api/telemetry", async (req, res) => {
 });
 
 // =====================================================
+// USB SERIAL COM PORT BRIDGE ENDPOINTS
+// =====================================================
+app.get("/api/serial/ports", async (req, res) => {
+  const ports = await listSerialPorts();
+  const status = getSerialStatus();
+  res.json({ status, ports });
+});
+
+app.post("/api/serial/connect", async (req, res) => {
+  const { path, baudRate = 115200 } = req.body;
+  if (!path) return res.status(400).json({ error: "COM port path is required (e.g. COM3)" });
+
+  try {
+    const result = await connectSerialPort(path, baudRate);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/serial/disconnect", async (req, res) => {
+  const result = await disconnectSerialPort();
+  res.json(result);
+});
+
+// =====================================================
+// TELEGRAM / WEBHOOK / SMS NOTIFICATIONS
+// =====================================================
+app.get("/api/notifications/settings", (req, res) => {
+  res.json(getSettings());
+});
+
+app.post("/api/notifications/settings", (req, res) => {
+  const updated = updateSettings(req.body);
+  res.json({ message: "Notification settings updated", settings: updated });
+});
+
+app.get("/api/notifications/history", (req, res) => {
+  res.json(getNotificationHistory());
+});
+
+app.post("/api/notifications/test", async (req, res) => {
+  const testAlert = {
+    sev: "Warning",
+    title: "Test Alert Dispatch from Krishi-Edge Gateway",
+    sub: "Simulated excursion event: Temp 32.5°C (Exceeded 30.0°C limit).",
+    unitId: "CS-101",
+  };
+  const result = await dispatchAlertNotification(testAlert);
+  res.json({ message: "Test alert notification dispatched", result });
+});
+
+// =====================================================
 // TELEMETRY SIMULATOR ROUTE
 // =====================================================
 app.post("/api/simulate/telemetry", async (req, res) => {
-  const { unitId = "CS-101", temp = 4.5, humidity = 85.0 } = req.body;
+  const { unitId = "CS-101", temp = 28.5, humidity = 82.0 } = req.body;
 
   const record = await appendPassportRecord(unitId, {
     temperature: temp,
@@ -196,7 +267,6 @@ app.listen(PORT, () => {
   console.log(`====================================================`);
   console.log(`  KRISHI-EDGE BACKEND & ESP32 GATEWAY LISTENING ON PORT ${PORT}`);
   console.log(`  Telemetry Ingestion: http://localhost:${PORT}/api/telemetry`);
-  console.log(`  Hash Chain Verifier: http://localhost:${PORT}/api/passport/verify/CS-101`);
-  console.log(`  ESP32-CAM Proxy    : http://localhost:${PORT}/api/camera/snapshot`);
+  console.log(`  USB Serial Bridge  : http://localhost:${PORT}/api/serial/ports`);
   console.log(`====================================================`);
 });

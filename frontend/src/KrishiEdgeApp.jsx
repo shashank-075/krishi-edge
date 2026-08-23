@@ -513,9 +513,111 @@ function PassportSection({ units, selectedUnitId, setSelectedUnitId }) {
               <b>Rules tested:</b> Temp &lt; 2.0°C &rarr; <code>FREEZE_RISK</code> | 2.0°C &ndash; 8.0°C &rarr; <code>NORMAL</code> | &gt; 8.0°C (&lt; 2min) &rarr; <code>WARNING</code> | &gt; 8.0°C (&ge; 2min) &rarr; <code>HOLD</code>
             </div>
           </Panel>
+
+          <SerialBridgePanel />
         </div>
       </div>
     </div>
+  );
+}
+
+/* ===================== USB SERIAL COM PORT BRIDGE PANEL ===================== */
+function SerialBridgePanel() {
+  const [ports, setPorts] = useState([]);
+  const [selectedPath, setSelectedPath] = useState("");
+  const [status, setStatus] = useState({ connected: false, path: null });
+  const [loading, setLoading] = useState(false);
+
+  const fetchPorts = async () => {
+    try {
+      const res = await fetch("/api/serial/ports");
+      if (res.ok) {
+        const data = await res.json();
+        setPorts(data.ports || []);
+        setStatus(data.status || { connected: false });
+        if (data.ports.length && !selectedPath) {
+          setSelectedPath(data.ports[0].path);
+        }
+      }
+    } catch (e) {
+      console.warn("Serial bridge offline", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchPorts();
+  }, []);
+
+  const handleConnect = async () => {
+    if (!selectedPath) return alert("Please select a COM port path.");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/serial/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: selectedPath, baudRate: 115200 }),
+      });
+      if (res.ok) {
+        await fetchPorts();
+      } else {
+        const err = await res.json();
+        alert(`Serial Connection Error: ${err.error || "Failed to connect"}`);
+      }
+    } catch (e) {
+      alert("Backend server offline.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/serial/disconnect", { method: "POST" });
+      if (res.ok) await fetchPorts();
+    } catch (e) {
+      console.warn(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Panel title="USB Serial Port Auto-Bridge (Hardware Test Port)" iconName="cpu" iconColor={C.battery}
+      right={
+        <button onClick={fetchPorts} style={{ background: C.panelAlt, border: `1px solid ${C.line2}`, borderRadius: 8, padding: "5px 10px", fontSize: 11, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
+          <Ic name="refresh" size={12} /> Scan COM Ports
+        </button>
+      }>
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 220 }}>
+          <label style={{ fontSize: 11, fontWeight: 800, color: C.inkFaint }}>Detected USB COM Port</label>
+          <select value={selectedPath} onChange={(e) => setSelectedPath(e.target.value)}
+            style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${C.line2}`, fontSize: 13, background: C.panel }}>
+            {ports.length ? ports.map((p) => (
+              <option key={p.path} value={p.path}>
+                {p.path} ({p.manufacturer || "USB Device"})
+              </option>
+            )) : <option value="">No USB COM ports detected (Plug ESP32 USB cable)</option>}
+          </select>
+        </div>
+
+        {status.connected ? (
+          <button onClick={handleDisconnect} disabled={loading}
+            style={{ background: C.crit, color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontSize: 12.5, fontWeight: 800, cursor: "pointer" }}>
+            Disconnect USB Serial ({status.path})
+          </button>
+        ) : (
+          <button onClick={handleConnect} disabled={loading || !selectedPath}
+            style={{ background: C.battery, color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontSize: 12.5, fontWeight: 800, cursor: selectedPath ? "pointer" : "not-allowed" }}>
+            {loading ? "Connecting..." : "Connect ESP32 USB Serial (115200 Baud)"}
+          </button>
+        )}
+      </div>
+      <div style={{ marginTop: 10, fontSize: 11, color: C.inkFaint }}>
+        <b>USB Auto-Bridge:</b> When your teammate plugs the physical ESP32 into a USB port on a laptop, connecting here automatically reads <code>Serial.println()</code> telemetry and ingests records into MongoDB in real time!
+      </div>
+    </Panel>
   );
 }
 
@@ -574,7 +676,7 @@ function CameraSection({ units }) {
         </Panel>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <Panel title="ESP32-CAM Camera Setup" iconName="settings" iconColor={C.cold}>
+          <Panel title="ESP32-CAM Setup & AI Model" iconName="settings" iconColor={C.cold}>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <div>
                 <label style={{ fontSize: 11, fontWeight: 800, color: C.inkFaint }}>ESP32-CAM Local IP Address</label>
@@ -593,16 +695,6 @@ function CameraSection({ units }) {
                   {[200, 300, 500, 1000].map((ms) => (
                     <Pill key={ms} label={`${ms}ms`} active={refreshInterval === ms} color={C.solar} onClick={() => setRefreshInterval(ms)} />
                   ))}
-                </div>
-              </div>
-
-              <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, color: C.inkFaint, textTransform: "uppercase", marginBottom: 6 }}>Wi-Fi Hardware Settings</div>
-                <div style={{ fontSize: 11.5, color: C.inkDim, lineHeight: 1.5 }}>
-                  <b>SSID:</b> Realme<br />
-                  <b>Pass:</b> okok12345<br />
-                  <b>Sensor PID:</b> GC2145 (RGB565 Mode)<br />
-                  <b>Resolution:</b> FRAMESIZE_QQVGA (160x120)
                 </div>
               </div>
 
@@ -1019,16 +1111,119 @@ function AlertsSection({ alerts, search }) {
   const filtered = filter === "All" ? bySearch : bySearch.filter((a) => a.sev === filter);
   return (
     <div>
-      <PageHead title="Alerts" subtitle="Delivered via SMS, IVR call, and field display — built for zero-smartphone reach" />
-      <Panel title="Alert Feed" iconName="bell" iconColor={C.crit} right={
-        <div style={{ display: "flex", gap: 6 }}>
-          {["All", "Critical", "Warning", "Info"].map((s) => <Pill key={s} label={s} active={filter === s} color={C.crit} onClick={() => setFilter(s)} />)}
-        </div>}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {filtered.length ? filtered.map((a) => <AlertRow key={a.id} a={a} />) : <Empty text="No alerts match this filter." />}
-        </div>
-      </Panel>
+      <PageHead title="Alerts & Real-Time Notifications" subtitle="Multi-channel notification engine — Telegram Bot, Webhooks, SMS, and IVR alerts" />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 14 }}>
+        <Panel title="Alert Feed" iconName="bell" iconColor={C.crit} right={
+          <div style={{ display: "flex", gap: 6 }}>
+            {["All", "Critical", "Warning", "Info"].map((s) => <Pill key={s} label={s} active={filter === s} color={C.crit} onClick={() => setFilter(s)} />)}
+          </div>}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {filtered.length ? filtered.map((a) => <AlertRow key={a.id} a={a} />) : <Empty text="No alerts match this filter." />}
+          </div>
+        </Panel>
+        <NotificationSettingsPanel />
+      </div>
     </div>
+  );
+}
+
+function NotificationSettingsPanel() {
+  const [form, setForm] = useState({
+    telegramEnabled: false,
+    telegramBotToken: "",
+    telegramChatId: "",
+    webhookEnabled: false,
+    webhookUrl: "",
+    smsEnabled: true,
+    farmerPhone: "+91-9876543210"
+  });
+  const [loading, setLoading] = useState(false);
+  const [testStatus, setTestStatus] = useState(null);
+
+  useEffect(() => {
+    fetch("/api/notifications/settings")
+      .then((r) => r.json())
+      .then((d) => setForm((prev) => ({ ...prev, ...d })))
+      .catch((e) => console.warn(e));
+  }, []);
+
+  const handleSave = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/notifications/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form)
+      });
+      if (res.ok) alert("Notification channel settings saved successfully!");
+    } catch (e) {
+      alert("Backend server offline.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleTestAlert = async () => {
+    setTestStatus("Sending test alert...");
+    try {
+      const res = await fetch("/api/notifications/test", { method: "POST" });
+      if (res.ok) {
+        const d = await res.json();
+        setTestStatus(`Dispatched via: ${d.result.dispatchedChannels.join(", ")}`);
+      }
+    } catch (e) {
+      setTestStatus("Backend server offline.");
+    }
+  };
+
+  return (
+    <Panel title="Alert Notification Setup" iconName="messageSquare" iconColor={C.coop}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ padding: 10, background: C.panelAlt, borderRadius: 10, border: `1px solid ${C.line}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: C.ink }}>Telegram Bot Channel</span>
+            <input type="checkbox" checked={form.telegramEnabled} onChange={(e) => setForm({ ...form, telegramEnabled: e.target.checked })} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <input type="text" placeholder="Telegram Bot Token" value={form.telegramBotToken} onChange={(e) => setForm({ ...form, telegramBotToken: e.target.value })}
+              style={{ width: "100%", padding: "6px 9px", fontSize: 11.5, borderRadius: 6, border: `1px solid ${C.line2}` }} />
+            <input type="text" placeholder="Chat ID / Channel Username" value={form.telegramChatId} onChange={(e) => setForm({ ...form, telegramChatId: e.target.value })}
+              style={{ width: "100%", padding: "6px 9px", fontSize: 11.5, borderRadius: 6, border: `1px solid ${C.line2}` }} />
+          </div>
+        </div>
+
+        <div style={{ padding: 10, background: C.panelAlt, borderRadius: 10, border: `1px solid ${C.line}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: C.ink }}>Custom Webhook URL</span>
+            <input type="checkbox" checked={form.webhookEnabled} onChange={(e) => setForm({ ...form, webhookEnabled: e.target.checked })} />
+          </div>
+          <input type="text" placeholder="https://example.com/api/webhook" value={form.webhookUrl} onChange={(e) => setForm({ ...form, webhookUrl: e.target.value })}
+            style={{ width: "100%", padding: "6px 9px", fontSize: 11.5, borderRadius: 6, border: `1px solid ${C.line2}` }} />
+        </div>
+
+        <div style={{ padding: 10, background: C.panelAlt, borderRadius: 10, border: `1px solid ${C.line}` }}>
+          <div style={{ fontSize: 12.5, fontWeight: 800, color: C.ink, marginBottom: 4 }}>Farmer SMS Contact</div>
+          <input type="text" value={form.farmerPhone} onChange={(e) => setForm({ ...form, farmerPhone: e.target.value })}
+            style={{ width: "100%", padding: "6px 9px", fontSize: 11.5, borderRadius: 6, border: `1px solid ${C.line2}` }} />
+        </div>
+
+        <button onClick={handleSave} disabled={loading}
+          style={{ width: "100%", background: C.coop, color: "#fff", border: "none", borderRadius: 9, padding: 9, fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
+          Save Notification Channels
+        </button>
+
+        <button onClick={handleTestAlert}
+          style={{ width: "100%", background: C.panelAlt, color: C.ink, border: `1px solid ${C.line2}`, borderRadius: 9, padding: 8, fontSize: 11.5, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
+          <Ic name="bell" size={13} color={C.crit} /> Dispatch Test Notification
+        </button>
+
+        {testStatus && (
+          <div style={{ fontSize: 10.5, color: C.safe, fontWeight: 800, textAlign: "center", background: C.safeSoft, padding: 6, borderRadius: 6 }}>
+            {testStatus}
+          </div>
+        )}
+      </div>
+    </Panel>
   );
 }
 

@@ -1,0 +1,92 @@
+# ColdRoot Vision — Freshness Classifier
+
+On-device produce freshness detection for ColdRoot's solar cold storage units, running on ESP32-CAM. Classifies tomato/capsicum crates as **fresh** or **stale**, publishes the result over MQTT, and merges it into the same per-unit record your dashboard already uses for temp/humidity/battery.
+
+## Pipeline overview
+
+```
+Kaggle dataset → prepare_dataset.py → train_model.py → convert_to_c_array.py
+                                                              ↓
+                                          esp32cam_inference.ino (on device)
+                                                              ↓
+                                          MQTT  →  mqtt_bridge.py  →  dashboard
+```
+
+## 1. Get the dataset
+
+Download from Kaggle:
+https://www.kaggle.com/datasets/raghavrpotdar/fresh-and-stale-images-of-fruits-and-vegetables
+
+Unzip it anywhere, then run:
+
+```bash
+python prepare_dataset.py /path/to/unzipped/download
+```
+
+This scans the raw download for tomato/capsicum folders (fresh + stale, regardless of exact naming) and copies them into the clean structure `train_model.py` expects:
+
+```
+data/
+  fresh_tomato/     *.jpg
+  stale_tomato/      *.jpg
+  fresh_capsicum/     *.jpg
+  stale_capsicum/     *.jpg
+```
+
+## 2. Train
+
+```bash
+pip install -r requirements.txt
+python train_model.py
+```
+
+Two-phase training: a classifier head on top of a frozen MobileNetV2 (alpha=0.35, the smallest official width multiplier — chosen for ESP32-CAM's RAM budget), then fine-tuning the top backbone layers. Includes augmentation (brightness/contrast variation especially, since cold-storage lighting differs from the dataset's daylight photos).
+
+Outputs in `models/`:
+- `coldroot_freshness.h5` — full Keras model
+- `coldroot_freshness.tflite` — float TFLite export
+- `coldroot_freshness_int8.tflite` — **the deployment target** — int8 quantized, ~4x smaller
+
+## 3. Convert for ESP32-CAM
+
+```bash
+python convert_to_c_array.py
+```
+
+Produces `models/model_data.h` — the quantized model as a C byte array, since the ESP32-CAM has no filesystem to load a `.tflite` file from at runtime in a typical Arduino build.
+
+## 4. Flash the firmware
+
+Copy `model_data.h` into `esp32cam_inference/`, open `esp32cam_inference.ino` in the Arduino IDE, install:
+
+- `TensorFlowLite_ESP32`
+- `PubSubClient`
+- ESP32 board package (bundles `esp32-camera`)
+
+Fill in WiFi credentials, MQTT broker address, and `UNIT_ID` (match your dashboard's unit `id`, e.g. `CS-101`) — one flash per physical unit, changing `UNIT_ID` each time.
+
+The firmware wakes every 15 minutes, captures a 96×96 RGB frame, converts RGB565→RGB888, applies the same [-1,1] normalization used in training, quantizes it using the model's own scale/zero-point (read from the model file, not hardcoded), runs inference, and publishes:
+
+```json
+{"unit": "CS-101", "visualFreshness": "fresh", "confidence": 0.87}
+```
+
+to `coldroot/CS-101/freshness`, then deep-sleeps to conserve battery.
+
+## 5. Run the bridge
+
+```bash
+python mqtt_bridge.py
+```
+
+Subscribes to `coldroot/+/freshness` across all units, writes results to `units_visual.json` keyed by unit ID. Swap `save_result()` for a real DB write once you wire it to ColdRoot's actual backend.
+
+## 6. Wire it into the dashboard
+
+Merge each unit's `visualFreshness` / `confidence` into the record already carrying `temp`, `humidity`, `battery`. Feed it into `genFreshness()` alongside the existing temperature-based `spoilageRisk` so `FreshnessSection` and `UnitModal` can show both sensor-predicted and camera-confirmed status side by side.
+
+## Notes
+
+- Only tomato and capsicum are covered by this dataset. Your other crops (cabbage, French beans, leafy greens, chilli, cauliflower, carrot) need self-captured training images from the actual deployed units — no solid public dataset exists for them. Once you have ~100-150 labeled images per crop, drop them into `data/fresh_<crop>/` and `data/stale_<crop>/`, then rerun `train_model.py` — new class folders are picked up automatically.
+- `kTensorArenaSize` (130KB) in the firmware has headroom for this model size; if you change `alpha` or `IMG_SIZE` in training, re-check this and adjust if `AllocateTensors()` fails.
+- MQTT was chosen over HTTP for the uplink because it's far lighter on data and battery, which matters given inconsistent connectivity across NER villages — if a unit has no WiFi at all, swap `WiFi.h` for a SIM800L (GSM) or LoRa module and publish over that instead.
