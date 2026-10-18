@@ -191,10 +191,10 @@ async function appendPassportRecord(unitId, recordData) {
     mkt_value: mkt,
     ethylene_ppm: ethylene,
     pdm_kurtosis: kurtosis,
-    state,
-    action,
-    confidence: Number(confidence),
-    previousHash,
+    state: recordData.state || 'NORMAL',
+    action: recordData.action || 'CONTINUE',
+    confidence: Number(recordData.confidence || 95),
+    previousHash: recordData.previousHash || '0000000000000000000000000000000000000000000000000000000000000000', 
   };
 
   entry.currentHash = recordData.currentHash || calculateSHA256(entry);
@@ -230,7 +230,8 @@ async function appendPassportRecord(unitId, recordData) {
     u.mkt_value = mkt;
     u.ethylene_ppm = ethylene;
     u.pdm_kurtosis = kurtosis;
-    u.status = state === "NORMAL" ? "Healthy" : state === "WARNING" ? "Warning" : "Critical";
+    const resolvedState = recordData.state || 'NORMAL';
+    u.status =resolvedState === "NORMAL" ? "Healthy" :resolvedState === "WARNING" ? "Warning" : "Critical";
     u.lastSeen = new Date().toISOString();
   }
 
